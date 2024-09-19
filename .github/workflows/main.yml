@@ -1,0 +1,92 @@
+name: Build and Upload Custom Alpine Extended ISO
+
+on:
+  push:
+    branches:
+      - main
+
+jobs:
+  build-iso:
+    runs-on: ubuntu-latest  # Using Ubuntu to run Alpine in Docker
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v2
+
+      - name: Setup Alpine environment in Docker
+        run: |
+          # Start an Alpine container to build the ISO within it
+          docker run -d --name alpine-build alpine:latest /bin/sh -c "
+            apk add --no-cache alpine-sdk alpine-conf syslinux xorriso squashfs-tools grub grub-efi mtools dosfstools upower udev dbus;
+            adduser -D -G abuild build;
+            echo 'permit :abuild' > /etc/doas.d/doas.conf;
+            echo 'permit persist :abuild' >> /etc/doas.d/doas.conf;
+            su - build -c 'abuild-keygen -i -a';
+            git clone --depth=1 https://gitlab.alpinelinux.org/alpine/aports.git;
+          "
+
+      - name: Create Custom Extended ISO with Battery Check Script
+        run: |
+          docker exec alpine-build /bin/sh -c "
+            # Create directory for ISO and mkimg script
+            mkdir -p /home/build/iso;
+            PROFILENAME=extended;
+
+            # Custom mkimg script that uses the extended profile and includes upower
+            cat << EOF > /home/build/aports/scripts/mkimg.\$PROFILENAME.sh
+            profile_\$PROFILENAME() {
+                profile_extended
+                apks='\$apks alpine-base upower udev dbus'
+            }
+            EOF
+
+            chmod +x /home/build/aports/scripts/mkimg.\$PROFILENAME.sh;
+
+            # Build the Extended ISO
+            sh /home/build/aports/scripts/mkimage.sh --tag latest \
+              --outdir /home/build/iso \
+              --arch x86_64 \
+              --profile \$PROFILENAME;
+          "
+
+      - name: Embed Battery Check Script
+        run: |
+          docker exec alpine-build /bin/sh -c "
+            # Battery check script
+            cat << 'EOF' > /usr/local/bin/check_battery.sh
+            #!/bin/sh
+            # Display all battery info
+            upower -e | grep -E 'battery' | while read -r battery; do
+              upower -i \$battery
+            done
+
+            # Check battery capacity
+            CAPACITY=\$(upower -i \$(upower -e | grep battery) | grep -i 'capacity' | awk '{print \$2}' | sed 's/%//')
+
+            # Display Pass/Fail banner based on capacity
+            if [ \$CAPACITY -ge 80 ]; then
+              echo -e '\033[1;32mPASS: Battery capacity is at or above 80%\033[0m'
+            else
+              echo -e '\033[1;31mFAIL: Battery capacity is below 80%\033[0m'
+            fi
+
+            echo 'Press any key to shut down...'
+            read -n 1
+            poweroff
+            EOF
+
+            chmod +x /usr/local/bin/check_battery.sh;
+
+            # Automatically run the battery check script on boot
+            echo '/usr/local/bin/check_battery.sh' >> /etc/profile;
+          "
+
+      - name: Copy ISO for Upload
+        run: |
+          docker cp alpine-build:/home/build/iso/ ./iso/
+
+      - name: Upload ISO as an artifact
+        uses: actions/upload-artifact@v2
+        with:
+          name: custom-alpine-extended-iso
+          path: ./iso/
