@@ -4,105 +4,90 @@ on:
   push:
     branches:
       - main
+  workflow_dispatch:
 
 jobs:
-  build:
-    runs-on: ubuntu-latest  # You can change this if using a self-hosted runner with Alpine preinstalled
-
+  build-iso:
+    runs-on: ubuntu-latest
+    container:
+      image: alpine:edge
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v3
-
-      - name: Set up Alpine environment
+      - name: Set up build environment
         run: |
-          sudo apt-get update
-          sudo apt-get install -y alpine-sdk alpine-conf syslinux xorriso squashfs-tools grub grub-efi doas
-          sudo adduser --disabled-password --gecos "" build
-          sudo adduser build abuild
-          echo "permit :abuild" | sudo tee /etc/doas.d/doas.conf
-          sudo su - build
+          apk update
+          apk add alpine-sdk alpine-conf syslinux xorriso squashfs-tools grub grub-efi doas mtools dosfstools
+
+          # Add user 'build' and set permissions
+          adduser -D build
+          addgroup build abuild
+          echo "permit :abuild" > /etc/doas.d/doas.conf
+          echo "permit persist :abuild" >> /etc/doas.d/doas.conf
+
+          # Switch to the 'build' user
+          su - build
 
       - name: Clone Alpine aports repository
         run: |
           git clone --depth=1 https://gitlab.alpinelinux.org/alpine/aports.git
-          cd aports
 
-      - name: Install signing keys and setup environment
+      - name: Create mkimg.profile script for custom ISO
         run: |
-          abuild-keygen -i -a
-          doas apk update
-          mkdir -pv ~/tmp
-          export TMPDIR=~/tmp
-
-      - name: Set up custom Extended profile
-        run: |
-          export PROFILENAME=extended
-          cat << 'EOF' > ~/aports/scripts/mkimg.$PROFILENAME.sh
+          export PROFILENAME=custom
+          cat << EOF > ~/aports/scripts/mkimg.$PROFILENAME.sh
           profile_$PROFILENAME() {
-              profile_extended
+              profile_standard
               kernel_cmdline="unionfs_size=512M console=tty0 console=ttyS0,115200"
-              apks="$apks upower bash"
+              syslinux_serial="0 115200"
+              apks="\$apks upower"
+
+              # Additional packages for upower
+              apks="\$apks linux-firmware"
+
               local _k _a
-              for _k in $kernel_flavors; do
-                  apks="$apks linux-$_k"
-                  for _a in $kernel_addons; do
-                      apks="$apks $_a-$_k"
-                  done
+              for _k in \$kernel_flavors; do
+                  apks="\$apks linux-\$_k"
               done
-              apks="$apks linux-firmware"
-              apkovl="aports/scripts/genapkovl-mkimgoverlay.sh"
           }
           EOF
-          chmod +x ~/aports/scripts/mkimg.$PROFILENAME.sh
 
-      - name: Create apkovl for custom profile
+      - name: Add upower to live system via genapkovl script
         run: |
-          cat << 'EOF' > ~/aports/scripts/genapkovl-mkimgoverlay.sh
-          mkdir -p "$tmp"/etc/apk
-          makefile root:root 0644 "$tmp"/etc/apk/world <<EOF
-          alpine-base
-          upower
-          bash
-          EOF
-          rc_add upower boot
+          cp ~/aports/scripts/genapkovl-dhcp.sh ~/aports/scripts/genapkovl-mkimgoverlay.sh
+          sed -i '/makefile root:root 0644/a\\nupower\n' ~/aports/scripts/genapkovl-mkimgoverlay.sh
+          echo "apkovl=\"aports/scripts/genapkovl-mkimgoverlay.sh\"" >> ~/aports/scripts/mkimg.$PROFILENAME.sh
+
+      - name: Create custom script for battery check
+        run: |
+          cat << 'EOF' > ~/battery_check.sh
+          #!/bin/sh
+          echo "Battery Information:"
+          upower -i $(upower -e | grep battery) | grep -E "state|to\ full|percentage|capacity"
+
+          # Check if the battery's capacity is above or below 80%
+          capacity=$(upower -i $(upower -e | grep battery) | grep -oP "(?<=capacity:\s)\d+")
+          if [ "\$capacity" -ge 80 ]; then
+              echo "=================="
+              echo "       PASS        "
+              echo "=================="
+          else
+              echo "=================="
+              echo "       FAIL        "
+              echo "=================="
+          fi
           EOF
 
-      - name: Build the custom ISO
+          chmod +x ~/battery_check.sh
+          echo "battery_check.sh" >> ~/aports/scripts/mkimg.$PROFILENAME.sh
+
+      - name: Build the custom Alpine ISO
         run: |
           mkdir -p ~/iso
-          sh ~/aports/scripts/mkimage.sh --tag edge \
-              --outdir ~/iso \
-              --arch x86_64 \
-              --repository https://dl-cdn.alpinelinux.org/alpine/edge/main \
-              --profile extended
+          sh ~/aports/scripts/mkimage.sh --tag edge --outdir ~/iso --arch x86_64 \
+            --repository https://dl-cdn.alpinelinux.org/alpine/edge/main \
+            --profile custom
 
-      - name: Install Upower and dependencies
-        run: |
-          doas apk add upower glib libgudev musl
-
-      - name: Run battery health check script
-        run: |
-          cat << 'EOF' > ~/battery-check.sh
-          #!/bin/bash
-          for battery in \$(upower -e | grep battery); do
-              upower -i \$battery
-              capacity=\$(upower -i \$battery | grep "capacity" | awk '{print \$2}')
-              echo "Battery Capacity: \$capacity%"
-              if (( \$(echo "\$capacity >= 80" | bc -l) )); then
-                  echo -e "\e[32mPASS\e[0m"  # Green for pass
-              else
-                  echo -e "\e[31mFAIL\e[0m"  # Red for fail
-              fi
-          done
-          echo "Press any key to shut down..."
-          read -n 1
-          shutdown now
-          EOF
-          chmod +x ~/battery-check.sh
-          ./battery-check.sh
-
-      - name: Upload ISO artifact
+      - name: Upload ISO as artifact
         uses: actions/upload-artifact@v3
         with:
           name: custom-alpine-iso
-          path: ~/iso
+          path: ~/iso/*.iso
