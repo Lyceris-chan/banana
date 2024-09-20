@@ -11,6 +11,7 @@ jobs:
     runs-on: ubuntu-latest
     container:
       image: alpine:edge
+      options: --user root  # Run as root to avoid permission issues
     steps:
       - name: Install Prerequisites
         run: |
@@ -33,7 +34,7 @@ jobs:
 
       - name: Generate signing keys for abuild
         run: |
-          abuild-keygen -i -a -n
+          abuild-keygen -i -a
 
       - name: Verify keys are in /etc/apk/keys/
         run: |
