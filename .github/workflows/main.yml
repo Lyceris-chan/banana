@@ -12,114 +12,96 @@ jobs:
     container:
       image: alpine:edge
     steps:
-      - name: Install required packages
+      - name: Install Prerequisites
         run: |
+          # Install the required tools
           apk update
-          apk add alpine-sdk alpine-conf syslinux xorriso squashfs-tools grub grub-efi doas
-          apk add mtools dosfstools grub-efi
+          apk add alpine-sdk alpine-conf syslinux xorriso squashfs-tools grub grub-efi doas mtools dosfstools grub-efi
 
-      - name: Create 'build' user and add to 'abuild' group
+      - name: Create build user and add to abuild group
         run: |
           adduser -D build -G abuild
 
-      - name: Configure doas permissions
+      - name: Configure doas for build user
         run: |
           echo "permit :abuild" > /etc/doas.d/doas.conf
           echo "permit persist :abuild" >> /etc/doas.d/doas.conf
 
-      - name: Switch to 'build' user
+      - name: Switch to build user
         run: |
-          su - build -c "echo 'Switched to build user'"
+          su - build
 
-      - name: Generate signing keys
+      - name: Generate signing keys for abuild
         run: |
-          su - build -c "abuild-keygen -i -a"
-          su - build -c "ls /etc/apk/keys/"
+          abuild-keygen -i -a
 
-      - name: Clone Alpine aports repository
+      - name: Verify keys are in /etc/apk/keys/
         run: |
-          su - build -c "git clone --depth=1 https://gitlab.alpinelinux.org/alpine/aports.git"
+          ls /etc/apk/keys/
+
+      - name: Clone the Alpine aports repository
+        run: |
+          git clone --depth=1 https://gitlab.alpinelinux.org/alpine/aports.git
 
       - name: Update apk index
         run: |
           doas apk update
 
-      - name: Ensure sufficient /tmp space
+      - name: Create local tmp directory if needed
         run: |
-          su - build -c "mkdir -pv ~/tmp"
-          su - build -c "export TMPDIR=~/tmp"
+          mkdir -pv ~/tmp
+          export TMPDIR=~/tmp
 
-      - name: Create mkimg profile script
+      - name: Create mkimg custom profile script
         run: |
-          su - build -c "export PROFILENAME=nas"
-          su - build -c "cat << EOF > ~/aports/scripts/mkimg.\$PROFILENAME.sh
-profile_\$PROFILENAME() {
-    profile_standard
-    kernel_cmdline=\"unionfs_size=512M console=tty0 console=ttyS0,115200\"
-    syslinux_serial=\"0 115200\"
-    kernel_addons=\"zfs\"
-    apks=\"\$apks iscsi-scst zfs-scripts zfs zfs-utils-py
-        cciss_vol_status lvm2 mdadm mkinitfs mtools nfs-utils
-        parted rsync sfdisk syslinux util-linux xfsprogs
-        dosfstools ntfs-3g
-        \"
-    local _k _a
-    for _k in \$kernel_flavors; do
-        apks=\"\$apks linux-\$_k\"
-        for _a in \$kernel_addons; do
-            apks=\"\$apks \$_a-\$_k\"
-        done
-    done
-    apks=\"\$apks linux-firmware\"
-}
-EOF"
-          su - build -c "chmod +x ~/aports/scripts/mkimg.\$PROFILENAME.sh"
+          export PROFILENAME=nas
+          cat << EOF > ~/aports/scripts/mkimg.$PROFILENAME.sh
+          profile_$PROFILENAME() {
+              profile_standard
+              kernel_cmdline="unionfs_size=512M console=tty0 console=ttyS0,115200"
+              syslinux_serial="0 115200"
+              kernel_addons="zfs"
+              apks="\$apks iscsi-scst zfs-scripts zfs zfs-utils-py
+                      cciss_vol_status lvm2 mdadm mkinitfs mtools nfs-utils
+                      parted rsync sfdisk syslinux util-linux xfsprogs
+                      dosfstools ntfs-3g
+                      "
+              local _k _a
+              for _k in \$kernel_flavors; do
+                  apks="\$apks linux-\$_k"
+                  for _a in \$kernel_addons; do
+                      apks="\$apks \$_a-\$_k"
+                  done
+              done
+              apks="\$apks linux-firmware"
+          }
+          EOF
+          chmod +x ~/aports/scripts/mkimg.$PROFILENAME.sh
 
-      - name: Create custom genapkovl script
+      - name: Make packages available on boot (genapkovl-mkimgoverlay.sh)
         run: |
-          su - build -c "cp ~/aports/scripts/genapkovl-dhcp.sh ~/aports/scripts/genapkovl-mkimgoverlay.sh"
-          su - build -c "sed -i '/mkdir -p \"\$tmp\"\/etc\/apk/a\\
-makefile root:root 0644 \"\$tmp\"/etc/apk/world <<EOF\\
-alpine-base\\
-iscsi-scst\\
-zfs-scripts\\
-zfs\\
-zfs-utils-py\\
-cciss_vol_status\\
-lvm2\\
-mdadm\\
-mkinitfs\\
-mtools\\
-nfs-utils\\
-parted\\
-rsync\\
-sfdisk\\
-syslinux\\
-util-linux\\
-xfsprogs\\
-dosfstools\\
-ntfs-3g\\
-EOF' ~/aports/scripts/genapkovl-mkimgoverlay.sh"
+          cp ~/aports/scripts/genapkovl-dhcp.sh ~/aports/scripts/genapkovl-mkimgoverlay.sh
+          sed -i '/makefile root:root 0644/a alpine-base\n<apk1-service>\n<apk2-service>' ~/aports/scripts/genapkovl-mkimgoverlay.sh
+          sed -i '/rc_add/a rc_add <apk1-service> boot\nrc_add <apk2-service> boot' ~/aports/scripts/genapkovl-mkimgoverlay.sh
 
-          su - build -c "sed -i '/^rc_add/ a\\
-rc_add zfs boot' ~/aports/scripts/genapkovl-mkimgoverlay.sh"
-
-          su - build -c "echo 'apkovl=\"aports/scripts/genapkovl-mkimgoverlay.sh\"' >> ~/aports/scripts/mkimg.\$PROFILENAME.sh"
-
-      - name: Create ISO output directory
+      - name: Link the overlay to the profile build script
         run: |
-          su - build -c "mkdir -p ~/iso"
+          echo "apkovl=\"aports/scripts/genapkovl-mkimgoverlay.sh\"" >> ~/aports/scripts/mkimg.$PROFILENAME.sh
 
-      - name: Build the custom Alpine ISO
+      - name: Create ISO directory
         run: |
-          su - build -c "sh ~/aports/scripts/mkimage.sh --tag edge \
+          mkdir -p ~/iso
+
+      - name: Build the custom ISO
+        run: |
+          sh ~/aports/scripts/mkimage.sh --tag edge \
             --outdir ~/iso \
             --arch x86_64 \
             --repository https://dl-cdn.alpinelinux.org/alpine/edge/main \
-            --profile \$PROFILENAME"
+            --profile nas
 
       - name: Upload ISO as artifact
         uses: actions/upload-artifact@v3
         with:
           name: custom-alpine-iso
-          path: /home/build/iso/*.iso
+          path: ~/iso/*.iso
