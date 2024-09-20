@@ -12,96 +12,114 @@ jobs:
     container:
       image: alpine:edge
     steps:
-      - name: Set up build environment
+      - name: Install required packages
         run: |
-          # Update packages and install dependencies
           apk update
-          apk add alpine-sdk alpine-conf syslinux xorriso squashfs-tools grub grub-efi mtools dosfstools doas
+          apk add alpine-sdk alpine-conf syslinux xorriso squashfs-tools grub grub-efi doas
+          apk add mtools dosfstools grub-efi
 
-          # Create 'build' user and configure permissions
-          adduser -D build
-          addgroup build abuild
+      - name: Create 'build' user and add to 'abuild' group
+        run: |
+          adduser -D build -G abuild
+
+      - name: Configure doas permissions
+        run: |
           echo "permit :abuild" > /etc/doas.d/doas.conf
           echo "permit persist :abuild" >> /etc/doas.d/doas.conf
 
-          # Switch to build user
-          su - build
+      - name: Switch to 'build' user
+        run: |
+          su - build -c "echo 'Switched to build user'"
 
       - name: Generate signing keys
         run: |
-          abuild-keygen -i -a
-          ls /etc/apk/keys/
+          su - build -c "abuild-keygen -i -a"
+          su - build -c "ls /etc/apk/keys/"
 
       - name: Clone Alpine aports repository
         run: |
-          git clone --depth=1 https://gitlab.alpinelinux.org/alpine/aports.git ~/aports
+          su - build -c "git clone --depth=1 https://gitlab.alpinelinux.org/alpine/aports.git"
 
-      - name: Configure TMPDIR to avoid low space issues
+      - name: Update apk index
         run: |
-          mkdir -pv ~/tmp
-          export TMPDIR=~/tmp
+          doas apk update
 
-      - name: Create mkimg profile for custom ISO
+      - name: Ensure sufficient /tmp space
         run: |
-          mkdir -p ~/aports/scripts
-          export PROFILENAME=custom
-          cat << 'EOF' > ~/aports/scripts/mkimg.$PROFILENAME.sh
-          profile_$PROFILENAME() {
-              profile_standard
-              kernel_cmdline="unionfs_size=512M console=tty0 console=ttyS0,115200"
-              syslinux_serial="0 115200"
-              apks="\$apks upower linux-firmware"
+          su - build -c "mkdir -pv ~/tmp"
+          su - build -c "export TMPDIR=~/tmp"
 
-              local _k
-              for _k in \$kernel_flavors; do
-                  apks="\$apks linux-\$_k"
-              done
-          }
-          EOF
-          chmod +x ~/aports/scripts/mkimg.$PROFILENAME.sh
-
-      - name: Add custom packages to the live system
+      - name: Create mkimg profile script
         run: |
-          cp ~/aports/scripts/genapkovl-dhcp.sh ~/aports/scripts/genapkovl-mkimgoverlay.sh
-          sed -i '/makefile root:root 0644/a\\nupower\n' ~/aports/scripts/genapkovl-mkimgoverlay.sh
-          echo "apkovl=\"aports/scripts/genapkovl-mkimgoverlay.sh\"" >> ~/aports/scripts/mkimg.$PROFILENAME.sh
+          su - build -c "export PROFILENAME=nas"
+          su - build -c "cat << EOF > ~/aports/scripts/mkimg.\$PROFILENAME.sh
+profile_\$PROFILENAME() {
+    profile_standard
+    kernel_cmdline=\"unionfs_size=512M console=tty0 console=ttyS0,115200\"
+    syslinux_serial=\"0 115200\"
+    kernel_addons=\"zfs\"
+    apks=\"\$apks iscsi-scst zfs-scripts zfs zfs-utils-py
+        cciss_vol_status lvm2 mdadm mkinitfs mtools nfs-utils
+        parted rsync sfdisk syslinux util-linux xfsprogs
+        dosfstools ntfs-3g
+        \"
+    local _k _a
+    for _k in \$kernel_flavors; do
+        apks=\"\$apks linux-\$_k\"
+        for _a in \$kernel_addons; do
+            apks=\"\$apks \$_a-\$_k\"
+        done
+    done
+    apks=\"\$apks linux-firmware\"
+}
+EOF"
+          su - build -c "chmod +x ~/aports/scripts/mkimg.\$PROFILENAME.sh"
 
-      - name: Create custom battery check script
+      - name: Create custom genapkovl script
         run: |
-          cat << 'EOF' > ~/aports/scripts/battery_check.sh
-          #!/bin/sh
-          echo "Battery Information:"
-          upower -i $(upower -e | grep battery) | grep -E "state|to full|percentage|capacity"
+          su - build -c "cp ~/aports/scripts/genapkovl-dhcp.sh ~/aports/scripts/genapkovl-mkimgoverlay.sh"
+          su - build -c "sed -i '/mkdir -p \"\$tmp\"\/etc\/apk/a\\
+makefile root:root 0644 \"\$tmp\"/etc/apk/world <<EOF\\
+alpine-base\\
+iscsi-scst\\
+zfs-scripts\\
+zfs\\
+zfs-utils-py\\
+cciss_vol_status\\
+lvm2\\
+mdadm\\
+mkinitfs\\
+mtools\\
+nfs-utils\\
+parted\\
+rsync\\
+sfdisk\\
+syslinux\\
+util-linux\\
+xfsprogs\\
+dosfstools\\
+ntfs-3g\\
+EOF' ~/aports/scripts/genapkovl-mkimgoverlay.sh"
 
-          # Check if the battery's capacity is above or below 80%
-          capacity=$(upower -i $(upower -e | grep battery) | grep -oP "(?<=capacity:\\s)\\d+")
-          if [ "\$capacity" -ge 80 ]; then
-              echo "=================="
-              echo "       PASS        "
-              echo "=================="
-          else
-              echo "=================="
-              echo "       FAIL        "
-              echo "=================="
-          fi
-          EOF
+          su - build -c "sed -i '/^rc_add/ a\\
+rc_add zfs boot' ~/aports/scripts/genapkovl-mkimgoverlay.sh"
 
-          chmod +x ~/aports/scripts/battery_check.sh
+          su - build -c "echo 'apkovl=\"aports/scripts/genapkovl-mkimgoverlay.sh\"' >> ~/aports/scripts/mkimg.\$PROFILENAME.sh"
 
-      - name: Embed battery check script into ISO root filesystem
+      - name: Create ISO output directory
         run: |
-          # Ensure the battery_check.sh script is added to the root filesystem
-          sed -i '/makefile root:root 0644/a\\ninstall -Dm755 ~/aports/scripts/battery_check.sh \$DESTDIR/root/battery_check.sh\n' ~/aports/scripts/genapkovl-mkimgoverlay.sh
+          su - build -c "mkdir -p ~/iso"
 
       - name: Build the custom Alpine ISO
         run: |
-          mkdir -p ~/iso
-          sh ~/aports/scripts/mkimage.sh --tag edge --outdir ~/iso --arch x86_64 \
+          su - build -c "sh ~/aports/scripts/mkimage.sh --tag edge \
+            --outdir ~/iso \
+            --arch x86_64 \
             --repository https://dl-cdn.alpinelinux.org/alpine/edge/main \
-            --profile custom
+            --profile \$PROFILENAME"
 
       - name: Upload ISO as artifact
         uses: actions/upload-artifact@v3
         with:
           name: custom-alpine-iso
-          path: ~/iso/*.iso
+          path: /home/build/iso/*.iso
