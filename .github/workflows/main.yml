@@ -12,37 +12,34 @@ jobs:
     container:
       image: alpine:edge
     steps:
-      - name: Set up cache for APK packages
-        uses: actions/cache@v3
-        with:
-          path: /var/cache/apk
-          key: ${{ runner.os }}-apk-cache
-          restore-keys: |
-            ${{ runner.os }}-apk-cache
-
       - name: Set up build environment
         run: |
+          # Update packages and install dependencies
           apk update
-          apk add alpine-sdk alpine-conf syslinux xorriso squashfs-tools grub grub-efi doas mtools dosfstools
+          apk add alpine-sdk alpine-conf syslinux xorriso squashfs-tools grub grub-efi mtools dosfstools doas
 
-          # Add user 'build' and configure permissions
+          # Create 'build' user and configure permissions
           adduser -D build
           addgroup build abuild
           echo "permit :abuild" > /etc/doas.d/doas.conf
           echo "permit persist :abuild" >> /etc/doas.d/doas.conf
 
-      - name: Cache aports repository
-        uses: actions/cache@v3
-        with:
-          path: ~/aports
-          key: ${{ runner.os }}-aports-cache
-          restore-keys: |
-            ${{ runner.os }}-aports-cache
+          # Switch to build user
+          su - build
 
-      - name: Clone Alpine aports repository (if cache miss)
-        if: steps.cache.outputs.cache-hit != 'true'
+      - name: Generate signing keys
+        run: |
+          abuild-keygen -i -a
+          ls /etc/apk/keys/
+
+      - name: Clone Alpine aports repository
         run: |
           git clone --depth=1 https://gitlab.alpinelinux.org/alpine/aports.git ~/aports
+
+      - name: Configure TMPDIR to avoid low space issues
+        run: |
+          mkdir -pv ~/tmp
+          export TMPDIR=~/tmp
 
       - name: Create mkimg profile for custom ISO
         run: |
@@ -61,8 +58,9 @@ jobs:
               done
           }
           EOF
+          chmod +x ~/aports/scripts/mkimg.$PROFILENAME.sh
 
-      - name: Modify genapkovl script to add upower
+      - name: Add custom packages to the live system
         run: |
           cp ~/aports/scripts/genapkovl-dhcp.sh ~/aports/scripts/genapkovl-mkimgoverlay.sh
           sed -i '/makefile root:root 0644/a\\nupower\n' ~/aports/scripts/genapkovl-mkimgoverlay.sh
@@ -76,7 +74,7 @@ jobs:
           upower -i $(upower -e | grep battery) | grep -E "state|to full|percentage|capacity"
 
           # Check if the battery's capacity is above or below 80%
-          capacity=$(upower -i $(upower -e | grep battery) | grep -oP "(?<=capacity:\s)\d+")
+          capacity=$(upower -i $(upower -e | grep battery) | grep -oP "(?<=capacity:\\s)\\d+")
           if [ "\$capacity" -ge 80 ]; then
               echo "=================="
               echo "       PASS        "
@@ -92,7 +90,7 @@ jobs:
 
       - name: Embed battery check script into ISO root filesystem
         run: |
-          # Ensure the battery_check.sh script gets copied into the ISO's root filesystem
+          # Ensure the battery_check.sh script is added to the root filesystem
           sed -i '/makefile root:root 0644/a\\ninstall -Dm755 ~/aports/scripts/battery_check.sh \$DESTDIR/root/battery_check.sh\n' ~/aports/scripts/genapkovl-mkimgoverlay.sh
 
       - name: Build the custom Alpine ISO
