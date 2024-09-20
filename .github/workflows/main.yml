@@ -33,7 +33,7 @@ jobs:
 
       - name: Generate signing keys for abuild
         run: |
-          abuild-keygen -i -a
+          abuild-keygen -i -a -n
 
       - name: Verify keys are in /etc/apk/keys/
         run: |
