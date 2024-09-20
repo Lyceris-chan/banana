@@ -70,7 +70,7 @@ jobs:
 
       - name: Create custom battery check script
         run: |
-          cat << 'EOF' > ~/battery_check.sh
+          cat << 'EOF' > ~/aports/scripts/battery_check.sh
           #!/bin/sh
           echo "Battery Information:"
           upower -i $(upower -e | grep battery) | grep -E "state|to full|percentage|capacity"
@@ -88,8 +88,13 @@ jobs:
           fi
           EOF
 
-          chmod +x ~/battery_check.sh
+          chmod +x ~/aports/scripts/battery_check.sh
+
+      - name: Add battery check script to profile
+        run: |
+          # Copy battery check script to the custom overlay for the live ISO
           echo "battery_check.sh" >> ~/aports/scripts/mkimg.$PROFILENAME.sh
+          echo "install -Dm755 ~/aports/scripts/battery_check.sh \$DESTDIR/root/battery_check.sh" >> ~/aports/scripts/mkimg.$PROFILENAME.sh
 
       - name: Build the custom Alpine ISO
         run: |
