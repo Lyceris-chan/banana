@@ -90,11 +90,10 @@ jobs:
 
           chmod +x ~/aports/scripts/battery_check.sh
 
-      - name: Add battery check script to profile
+      - name: Embed battery check script into ISO root filesystem
         run: |
-          # Copy battery check script to the custom overlay for the live ISO
-          echo "battery_check.sh" >> ~/aports/scripts/mkimg.$PROFILENAME.sh
-          echo "install -Dm755 ~/aports/scripts/battery_check.sh \$DESTDIR/root/battery_check.sh" >> ~/aports/scripts/mkimg.$PROFILENAME.sh
+          # Ensure the battery_check.sh script gets copied into the ISO's root filesystem
+          sed -i '/makefile root:root 0644/a\\ninstall -Dm755 ~/aports/scripts/battery_check.sh \$DESTDIR/root/battery_check.sh\n' ~/aports/scripts/genapkovl-mkimgoverlay.sh
 
       - name: Build the custom Alpine ISO
         run: |
