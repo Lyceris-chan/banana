@@ -32,6 +32,9 @@ jobs:
 
       - name: Create mkimg.profile script for custom ISO
         run: |
+          # In the name of glue if this works istg
+          # should fix: /__w/_temp/e02b137a-16db-4ffe-b68e-02373f183974.sh: line 2: can't create /github/home/aports/scripts/mkimg.custom.sh: nonexistent directory
+          # mkdir -p ~/aports/scripts
           export PROFILENAME=custom
           cat << EOF > ~/aports/scripts/mkimg.$PROFILENAME.sh
           profile_$PROFILENAME() {
