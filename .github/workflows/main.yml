@@ -27,7 +27,7 @@ jobs:
             adduser -D build -G abuild
             echo 'permit :abuild' > /etc/doas.d/doas.conf
             echo 'permit persist :abuild' >> /etc/doas.d/doas.conf
-            su - build -c 'abuild-keygen -i -a'
+            su - build -c 'abuild-keygen -i -a -n'
 
             # Clone the aports repository
             git clone --depth=1 https://gitlab.alpinelinux.org/alpine/aports.git /home/build/aports
