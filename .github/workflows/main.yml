@@ -1,4 +1,4 @@
-name: Build Custom ISO
+name: Build Alpine ISO
 
 on:
   push:
@@ -11,75 +11,60 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
+      # Step 1: Checkout the repository
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v3
 
-      - name: Set up Alpine environment
+      # Step 2: Run Docker container to build the ISO
+      - name: Build custom Alpine ISO in Docker
         run: |
-          sudo apt-get update
-          sudo apt-get install -y qemu-system-x86 curl
+          # Pull Alpine image and run commands inside the container
+          docker run --rm -v $(pwd)/iso:/iso alpine:latest /bin/sh -c "
+            # Install necessary packages
+            apk update && apk add alpine-sdk alpine-conf syslinux xorriso squashfs-tools grub grub-efi doas mtools dosfstools git
 
-          # Install Alpine via chroot
-          sudo mkdir -p /alpine-root
-          curl -o alpine-minirootfs.tar.gz http://dl-cdn.alpinelinux.org/alpine/latest-stable/releases/x86_64/alpine-minirootfs-latest-x86_64.tar.gz
-          sudo tar -xzf alpine-minirootfs.tar.gz -C /alpine-root
-          sudo mount -t proc proc /alpine-root/proc
-          sudo mount --rbind /sys /alpine-root/sys
-          sudo mount --rbind /dev /alpine-root/dev
+            # Create build user
+            adduser -D build -G abuild
+            echo 'permit :abuild' > /etc/doas.d/doas.conf
+            echo 'permit persist :abuild' >> /etc/doas.d/doas.conf
+            su - build -c 'abuild-keygen -i -a'
 
-      - name: Install prerequisites
-        run: |
-          sudo chroot /alpine-root /bin/sh -c "apk update && apk add alpine-sdk alpine-conf syslinux xorriso squashfs-tools grub grub-efi doas mtools dosfstools"
+            # Clone the aports repository
+            git clone --depth=1 https://gitlab.alpinelinux.org/alpine/aports.git /home/build/aports
 
-      - name: Set up build user
-        run: |
-          sudo chroot /alpine-root /bin/sh -c "adduser -D build -G abuild"
-          echo "permit :abuild" | sudo tee /alpine-root/etc/doas.d/doas.conf
-          echo "permit persist :abuild" | sudo tee -a /alpine-root/etc/doas.d/doas.conf
-
-      - name: Generate signing keys
-        run: |
-          sudo chroot /alpine-root /bin/sh -c "su - build -c 'abuild-keygen -i -a'"
-
-      - name: Clone aports repository
-        run: |
-          sudo chroot /alpine-root /bin/sh -c "su - build -c 'git clone --depth=1 https://gitlab.alpinelinux.org/alpine/aports.git'"
-
-      - name: Create custom profile
-        run: |
-          sudo chroot /alpine-root /bin/sh -c "su - build -c 'mkdir -p ~/aports/scripts'"
-          sudo chroot /alpine-root /bin/sh -c 'cat << EOF > /alpine-root/home/build/aports/scripts/mkimg.nas.sh
-          profile_nas() {
-            profile_standard
-            kernel_cmdline="unionfs_size=512M console=tty0 console=ttyS0,115200"
-            syslinux_serial="0 115200"
-            kernel_addons="zfs"
-            apks="\$apks iscsi-scst zfs-scripts zfs zfs-utils-py
-                  cciss_vol_status lvm2 mdadm mkinitfs mtools nfs-utils
-                  parted rsync sfdisk syslinux util-linux xfsprogs
-                  dosfstools ntfs-3g"
-            local _k _a
-            for _k in \$kernel_flavors; do
-              apks="\$apks linux-\$_k"
-              for _a in \$kernel_addons; do
-                apks="\$apks \$_a-\$_k"
+            # Create custom profile for the ISO
+            cat << EOF > /home/build/aports/scripts/mkimg.nas.sh
+            profile_nas() {
+              profile_standard
+              kernel_cmdline=\"unionfs_size=512M console=tty0 console=ttyS0,115200\"
+              syslinux_serial=\"0 115200\"
+              kernel_addons=\"zfs\"
+              apks=\"\$apks iscsi-scst zfs-scripts zfs zfs-utils-py
+                    cciss_vol_status lvm2 mdadm mkinitfs mtools nfs-utils
+                    parted rsync sfdisk syslinux util-linux xfsprogs
+                    dosfstools ntfs-3g\"
+              local _k _a
+              for _k in \$kernel_flavors; do
+                apks=\"\$apks linux-\$_k\"
+                for _a in \$kernel_addons; do
+                  apks=\"\$apks \$_a-\$_k\"
+                done
               done
-            done
-            apks="\$apks linux-firmware"
-          }
-          EOF'
+              apks=\"\$apks linux-firmware\"
+            }
+            EOF
 
-      - name: Build ISO image
-        run: |
-          sudo chroot /alpine-root /bin/sh -c 'mkdir -p /home/build/iso'
-          sudo chroot /alpine-root /bin/sh -c 'sh /home/build/aports/scripts/mkimage.sh --tag edge \
-          --outdir /home/build/iso \
-          --arch x86_64 \
-          --repository https://dl-cdn.alpinelinux.org/alpine/edge/main \
-          --profile nas'
+            # Make the script executable
+            chmod +x /home/build/aports/scripts/mkimg.nas.sh
 
+            # Build the ISO
+            mkdir -p /iso
+            sh /home/build/aports/scripts/mkimage.sh --tag edge --outdir /iso --arch x86_64 --repository https://dl-cdn.alpinelinux.org/alpine/edge/main --profile nas
+          "
+
+      # Step 3: Upload ISO artifact
       - name: Upload ISO artifact
         uses: actions/upload-artifact@v3
         with:
           name: custom-alpine-iso
-          path: /alpine-root/home/build/iso/
+          path: iso/
